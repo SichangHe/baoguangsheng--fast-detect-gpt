@@ -2,29 +2,29 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-import time
+
+import argparse
+import json
 
 import numpy as np
-import datasets
-import torch
-import random
-import argparse
-import os
-import json
-import custom_datasets
-from model import load_tokenizer, load_model
+
 
 def stats_str(data):
-    if type(data) == dict:
-        mean_orig = np.mean([len(v.split()) for v in data['original']])
-        mean_samp = np.mean([len(v.split()) for v in data['sampled']])
-        return f'{mean_orig:.0f} words (original), {mean_samp:.0f} words (sampled).'
+    if type(data) is dict:
+        mean_orig = np.mean([len(v.split()) for v in data["original"]])
+        mean_samp = np.mean([len(v.split()) for v in data["sampled"]])
+        return f"{mean_orig:.0f} words (original), {mean_samp:.0f} words (sampled)."
     else:
-        mean_orig = np.mean([len(v['original'].split()) for v in data])
-        mean_samp = np.mean([len(v['sampled'].split()) for v in data])
-        mean_perturb_orig = np.mean([np.mean([len(p.split()) for p in v['perturbed_original']]) for v in data])
-        mean_perturb_samp = np.mean([np.mean([len(p.split()) for p in v['perturbed_sampled']]) for v in data])
-        return f'{mean_orig:.0f} words (original), {mean_samp:.0f} words (sampled), {mean_perturb_orig:.0f} words (perturb original), {mean_perturb_samp:.0f} words (perturb sampled).'
+        mean_orig = np.mean([len(v["original"].split()) for v in data])
+        mean_samp = np.mean([len(v["sampled"].split()) for v in data])
+        mean_perturb_orig = np.mean(
+            [np.mean([len(p.split()) for p in v["perturbed_original"]]) for v in data]
+        )
+        mean_perturb_samp = np.mean(
+            [np.mean([len(p.split()) for p in v["perturbed_sampled"]]) for v in data]
+        )
+        return f"{mean_orig:.0f} words (original), {mean_samp:.0f} words (sampled), {mean_perturb_orig:.0f} words (perturb original), {mean_perturb_samp:.0f} words (perturb sampled)."
+
 
 def save_data(output_file, args, data):
     # write args to file
@@ -55,43 +55,51 @@ def load_data(input_file):
 
     return args, data
 
+
 def convert_data(input_file, output_file, max_words):
     def _reduce(text):
         lines = []
         nwords = 0
-        for line in text.split('\n'):
+        for line in text.split("\n"):
             if nwords >= max_words:
                 break
             words = line.split()
-            words = words[:max_words - nwords]
-            lines.append(' '.join(words))
+            words = words[: max_words - nwords]
+            lines.append(" ".join(words))
             nwords += len(words)
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
     args, data = load_data(input_file)
-    if type(data) == dict:
-        data['original'] = [_reduce(x) for x in data['original']]
-        data['sampled'] = [_reduce(x) for x in data['sampled']]
+    if type(data) is dict:
+        data["original"] = [_reduce(x) for x in data["original"]]
+        data["sampled"] = [_reduce(x) for x in data["sampled"]]
     else:
         for item in data:
-            item['original'] = _reduce(item['original'])
-            item['sampled'] = _reduce(item['sampled'])
-            item['perturbed_original'] = [_reduce(x) for x in item['perturbed_original']]
-            item['perturbed_sampled'] = [_reduce(x) for x in item['perturbed_sampled']]
+            item["original"] = _reduce(item["original"])
+            item["sampled"] = _reduce(item["sampled"])
+            item["perturbed_original"] = [
+                _reduce(x) for x in item["perturbed_original"]
+            ]
+            item["perturbed_sampled"] = [_reduce(x) for x in item["perturbed_sampled"]]
 
     save_data(output_file, args, data)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input_path', type=str, default="./exp_gpt3to4/data/")
-    parser.add_argument('--output_path', type=str, default="./exp_maxlen150/data/")
-    parser.add_argument('--max_words', type=int, default=150)
+    parser.add_argument("--input_path", type=str, default="./exp_gpt3to4/data/")
+    parser.add_argument("--output_path", type=str, default="./exp_maxlen150/data/")
+    parser.add_argument("--max_words", type=int, default=150)
     args = parser.parse_args()
 
     import glob
     import os.path as path
 
-    for file_name in glob.glob(f'{args.input_path}/*.raw_data.json'):
+    for file_name in glob.glob(f"{args.input_path}/*.raw_data.json"):
         print(file_name)
-        file_name = path.basename(file_name).replace('.raw_data.json', '')
-        convert_data(path.join(args.input_path, file_name), path.join(args.output_path, file_name), args.max_words)
+        file_name = path.basename(file_name).replace(".raw_data.json", "")
+        convert_data(
+            path.join(args.input_path, file_name),
+            path.join(args.output_path, file_name),
+            args.max_words,
+        )

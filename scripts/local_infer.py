@@ -2,12 +2,18 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import argparse
+from copy import copy
 
 import torch
-import argparse
-from model import load_tokenizer, load_model
-from fast_detect_gpt import get_sampling_discrepancy_analytic
 from scipy.stats import norm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from fast_detect_gpt import get_sampling_discrepancy_analytic
+
+
+SAMPLE_DEVICE = "cuda:0"
+SCORE_DEVICE = "cuda:1" if torch.cuda.device_count() >= 2 else SAMPLE_DEVICE
 
 
 # Considering balanced classification that p(D0) equals to p(D1), we have
@@ -20,22 +26,12 @@ def compute_prob_norm(x, mu0, sigma0, mu1, sigma1):
 
 
 class FastDetectGPT:
-    def __init__(self, args):
-        self.args = args
+    def __init__(
+        self,
+        scorer_name_or_path: str = "SichangHe/falcon-7b-FP8-Dynamic",
+        sampler_name_or_path: str = "SichangHe/falcon-7b-instruct-FP8-Dynamic",
+    ):
         self.criterion_fn = get_sampling_discrepancy_analytic
-        self.scoring_tokenizer = load_tokenizer(args.scoring_model_name, args.cache_dir)
-        self.scoring_model = load_model(
-            args.scoring_model_name, args.device, args.cache_dir
-        )
-        self.scoring_model.eval()
-        if args.sampling_model_name != args.scoring_model_name:
-            self.sampling_tokenizer = load_tokenizer(
-                args.sampling_model_name, args.cache_dir
-            )
-            self.sampling_model = load_model(
-                args.sampling_model_name, args.device, args.cache_dir
-            )
-            self.sampling_model.eval()
         # To obtain probability values that are easy for users to understand, we assume normal distributions
         # of the criteria and statistic the parameters on a group of dev samples. The normal distributions are defined
         # by mu0 and sigma0 for human texts and by mu1 and sigma1 for AI texts. We set sigma1 = 2 * sigma0 to
@@ -44,56 +40,48 @@ class FastDetectGPT:
         #   gpt-j-6B_gpt-neo-2.7B: mu0: 0.2713, sigma0: 0.9366, mu1: 2.2334, sigma1: 1.8731, acc:0.8122
         #   gpt-neo-2.7B_gpt-neo-2.7B: mu0: -0.2489, sigma0: 0.9968, mu1: 1.8983, sigma1: 1.9935, acc:0.8222
         #   falcon-7b_falcon-7b-instruct: mu0: -0.0707, sigma0: 0.9520, mu1: 2.9306, sigma1: 1.9039, acc:0.8938
-        distrib_params = {
-            "gpt-j-6B_gpt-neo-2.7B": {
-                "mu0": 0.2713,
-                "sigma0": 0.9366,
-                "mu1": 2.2334,
-                "sigma1": 1.8731,
-            },
-            "gpt-neo-2.7B_gpt-neo-2.7B": {
-                "mu0": -0.2489,
-                "sigma0": 0.9968,
-                "mu1": 1.8983,
-                "sigma1": 1.9935,
-            },
-            "falcon-7b_falcon-7b-instruct": {
-                "mu0": -0.0707,
-                "sigma0": 0.9520,
-                "mu1": 2.9306,
-                "sigma1": 1.9039,
-            },
+        self.classifier = {
+            "mu0": -0.0707,
+            "sigma0": 0.9520,
+            "mu1": 2.9306,
+            "sigma1": 1.9039,
+            "2tokenizers": False,
         }
-        key = f"{args.sampling_model_name}_{args.scoring_model_name}"
-        self.classifier = distrib_params[key]
+        tokenizer = AutoTokenizer.from_pretrained(scorer_name_or_path)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        self.tokenizer = tokenizer
+        self.scoring_model = AutoModelForCausalLM.from_pretrained(
+            scorer_name_or_path,
+            device_map={"": SCORE_DEVICE},
+            torch_dtype="auto",
+        ).eval()
+        self.sampling_model = AutoModelForCausalLM.from_pretrained(
+            scorer_name_or_path,
+            device_map={"": SAMPLE_DEVICE},
+            torch_dtype="auto",
+        ).eval()
 
     # compute conditional probability curvature
     def compute_crit(self, text):
-        tokenized = self.scoring_tokenizer(
+        tokens = self.tokenizer(
             text,
             truncation=True,
             return_tensors="pt",
             padding=True,
             return_token_type_ids=False,
-        ).to(self.args.device)
-        labels = tokenized.input_ids[:, 1:]
+        )
+        scoring_tokens = copy(tokens).to(SCORE_DEVICE)
+        sampling_tokens = copy(tokens).to(SAMPLE_DEVICE)
+        labels = scoring_tokens.input_ids[:, 1:]
         with torch.no_grad():
-            logits_score = self.scoring_model(**tokenized).logits[:, :-1]
-            if self.args.sampling_model_name == self.args.scoring_model_name:
-                logits_ref = logits_score
-            else:
-                tokenized = self.sampling_tokenizer(
-                    text,
-                    truncation=True,
-                    return_tensors="pt",
-                    padding=True,
-                    return_token_type_ids=False,
-                ).to(self.args.device)
-                assert torch.all(tokenized.input_ids[:, 1:] == labels), (
-                    "Tokenizer is mismatch."
-                )
-                logits_ref = self.sampling_model(**tokenized).logits[:, :-1]
-            crit = self.criterion_fn(logits_ref, logits_score, labels)
+            logits_score = self.scoring_model(**scoring_tokens).logits[:, :-1]
+            logits_ref = self.sampling_model(**sampling_tokens).logits[:, :-1]
+            crit = self.criterion_fn(
+                logits_ref.to(SCORE_DEVICE),
+                logits_score.to(SCORE_DEVICE),
+                labels.to(SCORE_DEVICE),
+            )
         return crit, labels.size(1)
 
     # compute probability

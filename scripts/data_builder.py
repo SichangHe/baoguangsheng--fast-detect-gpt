@@ -11,7 +11,7 @@ import argparse
 import os
 import json
 import custom_datasets
-from model import load_tokenizer, load_model
+from .model import load_tokenizer, load_model
 
 
 def save_data(output_file, args, data):
